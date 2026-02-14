@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>BloxKnocks_prototype 1.0</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #87CEEB;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none; /* Prevents text selection when clicking fast */
+        }
+        /* Crosshair */
+        #crosshair {
+            position: absolute;
+            top: 50%; left: 50%;
+            width: 8px; height: 8px;
+            background-color: white;
+            border: 2px solid rgba(0,0,0,0.5);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 10;
+            transition: width 0.2s, height 0.2s;
+        }
+        /* UI Elements */
+        #ui {
+            position: absolute; top: 20px; left: 20px;
+            color: white; font-size: 24px; font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            z-index: 10;
+        }
+        /* Player Health Bar */
+        #player-health-bg {
+            position: absolute; bottom: 30px; left: 50%;
+            transform: translateX(-50%);
+            width: 400px; height: 25px;
+            background-color: rgba(0, 0, 0, 0.7);
+            border: 2px solid white; border-radius: 10px;
+            z-index: 10; overflow: hidden;
+        }
+        #player-health-fill {
+            width: 100%; height: 100%;
+            background-color: #00ff00;
+            transition: width 0.1s, background-color 0.3s;
+        }
+        /* Overlays */
+        #instructions, #game-over {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.8); color: white;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            z-index: 20; cursor: pointer;
+        }
+        #game-over { display: none; background: rgba(100,0,0,0.9); }
+        h1 { margin: 0 0 10px 0; font-size: 48px; }
+        .btn { padding: 10px 20px; font-size: 20px; margin-top: 20px; cursor: pointer; background: white; color: black; border: none; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div id="crosshair"></div>
+    <div id="ui">Score: <span id="score">0</span></div>
+    
+    <div id="player-health-bg">
+        <div id="player-health-fill"></div>
+    </div>
+
+    <div id="instructions">
+        <h1>3rd Person Shooter</h1>
+        <p>Click to start!</p>
+        <p><b>WASD</b>: Move | <b>Space</b>: Jump | <b>Left Click</b>: Shoot | <b>Right Click</b>: Aim</p>
+    </div>
+
+    <div id="game-over">
+        <h1>GAME OVER</h1>
+        <p>YOU DIED</p>
+        <button class="btn" onclick="location.reload()">Restart Game</button>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // --- GAME STATE ---
+        let score = 0;
+        let isGameOver = false;
+        let playerHP = 100;
+        const maxPlayerHP = 100;
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 10, 50);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+        dirLight.position.set(10, 20, 10);
+        scene.add(dirLight);
+
+        const gridHelper = new THREE.GridHelper(100, 50, 0x000000, 0x444444);
+        scene.add(gridHelper);
+
+        // --- PLAYER ---
+        const playerGroup = new THREE.Group();
+        scene.add(playerGroup);
+
+        const bodyGeo = new THREE.BoxGeometry(1, 2, 1);
+        const bodyMat = new THREE.MeshLambertMaterial({ color: 0x2266cc });
+        const playerMesh = new THREE.Mesh(bodyGeo, bodyMat);
+        playerMesh.position.y = 1;
+        playerGroup.add(playerMesh);
+
+        // Gun
+        const gunGroup = new THREE.Group();
+        const barrelGeo = new THREE.BoxGeometry(0.2, 0.2, 1.2);
+        const gunMat = new THREE.MeshLambertMaterial({ color: 0x333333 });
+        const barrel = new THREE.Mesh(barrelGeo, gunMat);
+        barrel.position.set(0, 0, -0.4);
+        
+        const gripGeo = new THREE.BoxGeometry(0.2, 0.4, 0.2);
+        const grip = new THREE.Mesh(gripGeo, gunMat);
+        grip.position.set(0, -0.2, 0); grip.rotation.x = 0.2;
+        
+        gunGroup.add(barrel); gunGroup.add(grip);
+        gunGroup.position.set(0.7, 1.2, -0.5);
+        playerGroup.add(gunGroup);
+
+        // Camera Pivot
+        const cameraPivot = new THREE.Group();
+        cameraPivot.position.set(0, 1.5, 0);
+        playerGroup.add(cameraPivot);
+        
+        // Default camera position
+        camera.position.set(1.5, 0.5, 4);
+        cameraPivot.add(camera);
+
+        // --- VARIABLES ---
+        const bullets = [];
+        const enemies = [];
+        let yaw = 0, pitch = 0;
+        const keys = {};
+        
+        // Physics & Animation
+        let walkTime = 0, recoilTimer = 0;
+        let velocityY = 0;
+        const gravity = -0.012;
+        const jumpForce = 0.25;
+        let isGrounded = true;
+
+        // Aiming State
+        let isAiming = false;
+        const targetCameraPos = new THREE.Vector3();
+        let targetFOV = 75;
+
+        // --- CONTROLS ---
+        const instructions = document.getElementById('instructions');
+        
+        // Prevent right-click menu from opening so we can aim
+        document.addEventListener('contextmenu', e => e.preventDefault());
+
+        instructions.addEventListener('click', () => {
+            if (!isGameOver) document.body.requestPointerLock();
+        });
+
+        document.addEventListener('pointerlockchange', () => {
+            if (isGameOver) return;
+            instructions.style.display = (document.pointerLockElement === document.body) ? 'none' : 'flex';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (document.pointerLockElement === document.body && !isGameOver) {
+                // Slower sensitivity when aiming
+                const sens = isAiming ? 0.001 : 0.002;
+                yaw -= e.movementX * sens;
+                pitch -= e.movementY * sens;
+                pitch = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, pitch));
+            }
+        });
+
+        document.addEventListener('keydown', (e) => { keys[e.code] = true; });
+        document.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+        document.addEventListener('mousedown', (e) => {
+            if (document.pointerLockElement !== document.body || isGameOver) return;
+
+            // Right Click = Aim
+            if (e.button === 2) {
+                isAiming = true;
+                document.getElementById('crosshair').style.width = '4px';
+                document.getElementById('crosshair').style.height = '4px';
+            }
+            
+            // Left Click = Shoot
+            if (e.button === 0) {
+                recoilTimer = 0.2;
+                const bulletGeo = new THREE.BoxGeometry(0.1, 0.1, 0.4);
+                const bulletMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+                const bullet = new THREE.Mesh(bulletGeo, bulletMat);
+
+                const gunTip = new THREE.Vector3(0, 0, -1);
+                gunTip.applyMatrix4(gunGroup.matrixWorld);
+                bullet.position.copy(gunTip);
+
+                const raycaster = new THREE.Raycaster();
+                raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+                const targetPoint = raycaster.ray.origin.clone().add(raycaster.ray.direction.multiplyScalar(100));
+                
+                const velocity = targetPoint.sub(gunTip).normalize().multiplyScalar(isAiming ? 2.5 : 1.5); // Faster bullets when aiming
+                bullet.velocity = velocity;
+                bullet.lookAt(bullet.position.clone().add(velocity));
+                bullet.life = 60;
+
+                bullets.push(bullet);
+                scene.add(bullet);
+            }
+        });
+
+        document.addEventListener('mouseup', (e) => {
+            // Stop aiming on right click release
+            if (e.button === 2) {
+                isAiming = false;
+                document.getElementById('crosshair').style.width = '8px';
+                document.getElementById('crosshair').style.height = '8px';
+            }
+        });
+
+        // --- ENEMY LOGIC ---
+        function spawnEnemy() {
+            const enemyGroup = new THREE.Group();
+            
+            const enemyGeo = new THREE.BoxGeometry(1.2, 2.4, 1.2);
+            const enemyMat = new THREE.MeshLambertMaterial({ color: 0xff0000 });
+            const enemyMesh = new THREE.Mesh(enemyGeo, enemyMat);
+            enemyMesh.position.y = 1.2;
+            enemyGroup.add(enemyMesh);
+            
+            // 3D Health Bar (Above Enemy Head)
+            const hpGroup = new THREE.Group();
+            hpGroup.position.y = 2.6; // Hover above head
+            
+            const bgGeo = new THREE.PlaneGeometry(1.2, 0.2);
+            const bgMat = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide });
+            const bg = new THREE.Mesh(bgGeo, bgMat);
+            
+            const fgGeo = new THREE.PlaneGeometry(1.2, 0.2);
+            const fgMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide });
+            const fg = new THREE.Mesh(fgGeo, fgMat);
+            fg.position.z = 0.01; // Slightly in front so it doesn't glitch
+            
+            hpGroup.add(bg); hpGroup.add(fg);
+            enemyGroup.add(hpGroup);
+
+            // Set Enemy Stats
+            enemyGroup.hp = 100;
+            enemyGroup.maxHp = 100;
+            enemyGroup.hpBar = fg; // Reference to update it later
+
+            const angle = Math.random() * Math.PI * 2;
+            const radius = 25 + Math.random() * 15;
+            enemyGroup.position.set(
+                playerGroup.position.x + Math.cos(angle) * radius,
+                0,
+                playerGroup.position.z + Math.sin(angle) * radius
+            );
+            
+            enemies.push(enemyGroup);
+            scene.add(enemyGroup);
+        }
+
+        // --- GAME OVER LOGIC ---
+        function triggerGameOver() {
+            isGameOver = true;
+            document.exitPointerLock();
+            scene.remove(playerGroup); // Make player disappear
+            document.getElementById('game-over').style.display = 'flex';
+            document.getElementById('crosshair').style.display = 'none';
+            document.getElementById('ui').style.display = 'none';
+            document.getElementById('player-health-bg').style.display = 'none';
+        }
+
+        function takeDamage(amount) {
+            playerHP -= amount;
+            if (playerHP < 0) playerHP = 0;
+            
+            const fill = document.getElementById('player-health-fill');
+            fill.style.width = (playerHP / maxPlayerHP) * 100 + '%';
+            
+            // Change color to red if health is low
+            if (playerHP < 30) fill.style.backgroundColor = '#ff0000';
+            else if (playerHP < 60) fill.style.backgroundColor = '#ffff00';
+
+            if (playerHP <= 0 && !isGameOver) {
+                triggerGameOver();
+            }
+        }
+
+        // --- MAIN GAME LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isGameOver) {
+                renderer.render(scene, camera);
+                return; // Stop running game logic
+            }
+
+            if (document.pointerLockElement === document.body) {
+                // Aiming Camera Transition (Lerp)
+                const targetX = isAiming ? 0.8 : 1.5;
+                const targetZ = isAiming ? 2 : 4;
+                targetCameraPos.set(targetX, 0.5, targetZ);
+                targetFOV = isAiming ? 45 : 75;
+
+                // Smoothly move camera and zoom
+                camera.position.lerp(targetCameraPos, 0.15);
+                camera.fov += (targetFOV - camera.fov) * 0.15;
+                camera.updateProjectionMatrix();
+
+                // Rotations
+                playerGroup.rotation.y = yaw;
+                cameraPivot.rotation.x = pitch;
+
+                // Movement
+                let moved = false;
+                const speed = isAiming ? 0.08 : 0.15; // Walk slower when aiming
+                const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+                const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+
+                if (keys['KeyW']) { playerGroup.position.add(forward.clone().multiplyScalar(speed)); moved = true; }
+                if (keys['KeyS']) { playerGroup.position.add(forward.clone().multiplyScalar(-speed)); moved = true; }
+                if (keys['KeyA']) { playerGroup.position.add(right.clone().multiplyScalar(-speed)); moved = true; }
+                if (keys['KeyD']) { playerGroup.position.add(right.clone().multiplyScalar(speed)); moved = true; }
+
+                // Jump Logic (Gravity & Spacebar)
+                if (keys['Space'] && isGrounded) {
+                    velocityY = jumpForce;
+                    isGrounded = false;
+                }
+                
+                velocityY += gravity; // Apply gravity every frame
+                playerGroup.position.y += velocityY;
+                
+                // Floor Collision
+                if (playerGroup.position.y <= 0) {
+                    playerGroup.position.y = 0;
+                    velocityY = 0;
+                    isGrounded = true;
+                }
+
+                // Walk Animation (Only bob if on the ground)
+                if (moved && isGrounded) {
+                    walkTime += 0.25;
+                    playerMesh.position.y = 1 + Math.abs(Math.sin(walkTime)) * 0.2;
+                    playerMesh.rotation.z = Math.sin(walkTime * 0.5) * 0.05;
+                } else {
+                    playerMesh.position.y = 1;
+                    playerMesh.rotation.z = 0;
+                }
+
+                // Gun Recoil
+                let currentRecoil = 0;
+                if (recoilTimer > 0) {
+                    recoilTimer -= 0.02;
+                    currentRecoil = recoilTimer;
+                }
+                gunGroup.rotation.x = pitch + currentRecoil;
+                gunGroup.position.z = -0.5 + currentRecoil * 0.5;
+
+                // Update Bullets
+                for (let i = bullets.length - 1; i >= 0; i--) {
+                    let b = bullets[i];
+                    b.position.add(b.velocity);
+                    b.life--;
+
+                    if (b.life <= 0) {
+                        scene.remove(b); bullets.splice(i, 1);
+                        continue;
+                    }
+
+                    // Bullet vs Enemy Collision
+                    for (let j = enemies.length - 1; j >= 0; j--) {
+                        let e = enemies[j];
+                        
+                        // Because enemies are groups at Y=0, we check distance slightly up
+                        const enemyCenter = e.position.clone();
+                        enemyCenter.y += 1.2; 
+
+                        if (b.position.distanceTo(enemyCenter) < 1.5) {
+                            scene.remove(b);
+                            bullets.splice(i, 1);
+                            
+                            // Enemy takes damage (Requires ~3 shots to kill)
+                            e.hp -= 35; 
+                            
+                            // Scale down the green health bar inside the enemy group
+                            const healthPercentage = Math.max(0, e.hp / e.maxHp);
+                            e.hpBar.scale.x = healthPercentage;
+
+                            // If enemy dies
+                            if (e.hp <= 0) {
+                                scene.remove(e);
+                                enemies.splice(j, 1);
+                                score += 10;
+                                document.getElementById('score').innerText = score;
+                            }
+                            break; 
+                        }
+                    }
+                }
+
+                // Update Enemies
+                enemies.forEach(e => {
+                    e.lookAt(playerGroup.position);
+                    
+                    // Make sure the 3D health bar always faces the camera exactly
+                    e.children[1].lookAt(camera.position); 
+
+                    const dir = playerGroup.position.clone().sub(e.position).normalize();
+                    dir.y = 0; // Keep enemies on the floor
+                    e.position.add(dir.multiplyScalar(0.06));
+
+                    // Enemy vs Player Collision (Dealing Damage)
+                    if (e.position.distanceTo(playerGroup.position) < 1.5) {
+                        takeDamage(2); // Drains HP quickly while touching
+                    }
+                });
+
+                if (Math.random() < 0.02 && enemies.length < 15) spawnEnemy();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
